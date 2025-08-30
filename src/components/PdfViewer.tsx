@@ -249,14 +249,18 @@ export function PdfViewer({
   return (
     <div className="h-full w-full">
       <PanZoomCanvas
+        key={`pdf-page-${pageIndex}`} // Force re-render when page changes
         width={pageDimensions.width}
         height={pageDimensions.height}
       >
         {(canvas, overlay) => {
-          // Draw the page when canvas becomes available
-          if (canvas && pageCanvas && !canvas.style.backgroundImage) {
+          // Draw the page when canvas becomes available or page changes
+          if (canvas && pageCanvas) {
+            // Clear the canvas first
+            const ctx = canvas.getContext('2d')!;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // Draw the current page
             drawPageToCanvas(canvas);
-            canvas.style.backgroundImage = 'url(data:image/png;base64,loaded)';
           }
 
           return (
