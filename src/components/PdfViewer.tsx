@@ -74,7 +74,10 @@ export function PdfViewer({
     async function render() {
       if (!pdf) return;
       const page: PDFPageProxy = await pdf.getPage(pageIndex + 1);
-      const viewport = page.getViewport({ scale: 2.5 }); // Higher scale for better OCR quality
+      // Use higher scale for better OCR quality - aim for 300 DPI equivalent
+      const baseScale = 2.5;
+      const optimalScale = Math.min(4, Math.max(baseScale, 300 / 72)); // 300 DPI target
+      const viewport = page.getViewport({ scale: optimalScale });
       const canvas = canvasRef.current!;
       const ctx = canvas.getContext("2d")!;
       canvas.width = viewport.width;

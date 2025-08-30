@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { loadImageBitmap } from "@/utils/file";
+import { loadHighQualityImageCanvas } from "@/utils/file";
 import type { OCRRegion } from "@/utils/types";
 import { loadDetector, detectLayout } from "@/utils/cv";
 import { ocrRegions, ocrFullPage } from "@/utils/ocr-improved";
+import { PanZoomCanvas } from "./PanZoomCanvas";
 
 export function ImageViewer({
   file,
@@ -17,39 +18,46 @@ export function ImageViewer({
   onRegionsChange: (r: OCRRegion[]) => void;
   onExtracted: (page: number, regions: OCRRegion[]) => void;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const [detector, setDetector] = useState<any | null>(null);
   const [running, setRunning] = useState(false);
+  const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
+  const [imageData, setImageData] = useState<HTMLCanvasElement | null>(null);
 
+  // Load and prepare image data
   useEffect(() => {
     let mounted = true;
     async function loadImage() {
       if (!file) return;
-      const bitmap = await loadImageBitmap(file);
-      const canvas = canvasRef.current!;
-      const ctx = canvas.getContext("2d")!;
       
-      // Scale up for better OCR quality
-      const scale = 2;
-      canvas.width = bitmap.width * scale;
-      canvas.height = bitmap.height * scale;
-      
-      // Use smooth scaling
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-
-      // Clear overlay
-      const overlay = overlayRef.current!;
-      overlay.width = canvas.width;
-      overlay.height = canvas.height;
-      const octx = overlay.getContext("2d")!;
-      octx.clearRect(0, 0, overlay.width, overlay.height);
+      try {
+        // Load image with enhanced quality settings
+        const highQualityCanvas = await loadHighQualityImageCanvas(file);
+        
+        if (mounted) {
+          setImageDimensions({
+            width: highQualityCanvas.width,
+            height: highQualityCanvas.height
+          });
+          setImageData(highQualityCanvas);
+          console.log(`Loaded high-quality image: ${highQualityCanvas.width}x${highQualityCanvas.height}`);
+        }
+      } catch (error) {
+        console.error('Failed to load high-quality image:', error);
+      }
     }
     loadImage();
     return () => { mounted = false; };
   }, [file]);
+
+  // Draw image data when canvas is available
+  const drawImageToCanvas = (canvas: HTMLCanvasElement | null) => {
+    if (!canvas || !imageData) return;
+    
+    const ctx = canvas.getContext("2d")!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(imageData, 0, 0);
+  };
 
   // Lazy-load detector once on client
   useEffect(() => {
@@ -65,56 +73,62 @@ export function ImageViewer({
     return () => { mounted = false; };
   }, []);
 
-  async function handleDetect() {
-    if (!detector || !canvasRef.current) return;
-    setRunning(true);
-    try {
-      const raw = await detectLayout(detector, canvasRef.current);
-      // Stamp page number (always 0 for single image)
-      const stamped = raw.map(r => ({ ...r, page: 0 }));
-      onRegionsChange(stamped);
-      // Draw boxes
-      const overlay = overlayRef.current!;
-      const octx = overlay.getContext('2d')!;
-      octx.clearRect(0, 0, overlay.width, overlay.height);
-      octx.strokeStyle = '#ef4444';
-      octx.lineWidth = 2;
-      for (const r of stamped) {
-        octx.strokeRect(r.bbox.x, r.bbox.y, r.bbox.width, r.bbox.height);
+  const handleDetect = (canvas: HTMLCanvasElement | null, overlay: HTMLCanvasElement | null) => {
+    return async () => {
+      if (!detector || !canvas) return;
+      setRunning(true);
+      try {
+        const raw = await detectLayout(detector, canvas);
+        // Stamp page number (always 0 for single image)
+        const stamped = raw.map(r => ({ ...r, page: 0 }));
+        onRegionsChange(stamped);
+        // Draw boxes
+        if (overlay) {
+          const octx = overlay.getContext('2d')!;
+          octx.clearRect(0, 0, overlay.width, overlay.height);
+          octx.strokeStyle = '#ef4444';
+          octx.lineWidth = 2;
+          for (const r of stamped) {
+            octx.strokeRect(r.bbox.x, r.bbox.y, r.bbox.width, r.bbox.height);
+          }
+        }
+      } finally {
+        setRunning(false);
       }
-    } finally {
-      setRunning(false);
-    }
-  }
+    };
+  };
 
-  async function handleFullPageOCR() {
-    if (!canvasRef.current) return;
-    setRunning(true);
-    try {
-      const res = await ocrFullPage(canvasRef.current, 0);
-      onRegionsChange(res);
-      onExtracted(0, res);
-      // Draw region
-      drawRegions(res);
-    } finally {
-      setRunning(false);
-    }
-  }
+  const handleFullPageOCR = (canvas: HTMLCanvasElement | null, overlay: HTMLCanvasElement | null) => {
+    return async () => {
+      if (!canvas) return;
+      setRunning(true);
+      try {
+        const res = await ocrFullPage(canvas, 0);
+        onRegionsChange(res);
+        onExtracted(0, res);
+        // Draw region
+        drawRegions(res, overlay);
+      } finally {
+        setRunning(false);
+      }
+    };
+  };
 
-  async function handleOCR() {
-    if (!canvasRef.current || regions.length === 0) return;
-    setRunning(true);
-    try {
-      const res = await ocrRegions(canvasRef.current, 0, regions);
-      onExtracted(0, res);
-    } finally {
-      setRunning(false);
-    }
-  }
+  const handleOCR = (canvas: HTMLCanvasElement | null) => {
+    return async () => {
+      if (!canvas || regions.length === 0) return;
+      setRunning(true);
+      try {
+        const res = await ocrRegions(canvas, 0, regions);
+        onExtracted(0, res);
+      } finally {
+        setRunning(false);
+      }
+    };
+  };
 
-  function drawRegions(regionsToDrawn: OCRRegion[]) {
-    if (!overlayRef.current) return;
-    const overlay = overlayRef.current;
+  function drawRegions(regionsToDrawn: OCRRegion[], overlay: HTMLCanvasElement | null) {
+    if (!overlay) return;
     const octx = overlay.getContext('2d')!;
     octx.clearRect(0, 0, overlay.width, overlay.height);
     octx.strokeStyle = '#22c55e'; // Green for successful extraction
@@ -124,23 +138,55 @@ export function ImageViewer({
     }
   }
 
-  return (
-    <div className="h-full w-full flex flex-col">
-      <div className="flex items-center justify-between p-2 border-b">
-        <div className="text-sm">Image: {file.name}</div>
-        <div className="flex gap-2">
-          <button className="px-2 py-1 border rounded" onClick={handleFullPageOCR} disabled={running}>
-            {running ? '...' : 'Full Page OCR'}
-          </button>
-          <button className="px-2 py-1 border rounded" onClick={handleDetect} disabled={!detector || running}>
-            {running ? '...' : 'Manual Regions'}
-          </button>
+  if (!imageDimensions.width || !imageDimensions.height) {
+    return (
+      <div className="h-full w-full flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
+          <p className="mt-2 text-sm text-gray-600">Loading image...</p>
         </div>
       </div>
-      <div className="relative flex-1 overflow-auto bg-gray-50">
-        <canvas ref={canvasRef} className="block mx-auto" />
-        <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 mx-auto" />
-      </div>
+    );
+  }
+
+  return (
+    <div className="h-full w-full">
+      <PanZoomCanvas
+        width={imageDimensions.width}
+        height={imageDimensions.height}
+      >
+        {(canvas, overlay) => {
+          // Draw the image when canvas becomes available
+          if (canvas && imageData && !canvas.style.backgroundImage) {
+            drawImageToCanvas(canvas);
+            canvas.style.backgroundImage = 'url(data:image/png;base64,loaded)';
+          }
+
+          return (
+            <div className="flex items-center gap-2 p-2 border-t bg-gray-50">
+              <div className="text-sm text-gray-600">
+                Image: {file.name}
+              </div>
+              <div className="flex gap-2 ml-auto">
+                <button 
+                  className="px-3 py-1 text-sm border rounded hover:bg-gray-100" 
+                  onClick={handleFullPageOCR(canvas, overlay)} 
+                  disabled={running}
+                >
+                  {running ? 'Processing...' : 'Full Page OCR'}
+                </button>
+                <button 
+                  className="px-3 py-1 text-sm border rounded hover:bg-gray-100" 
+                  onClick={handleDetect(canvas, overlay)} 
+                  disabled={!detector || running}
+                >
+                  {running ? 'Processing...' : 'Manual Regions'}
+                </button>
+              </div>
+            </div>
+          );
+        }}
+      </PanZoomCanvas>
     </div>
   );
 }

@@ -1,38 +1,30 @@
 import Tesseract from "tesseract.js";
 import type { OCRRegion } from "@/utils/types";
+import { enhanceImageForOCR, getOptimalScale, type ImageEnhancementOptions } from "./image-enhancement";
+import { getOptimalConfig, applyConfigWithLogging } from "./tesseract-config";
 
-// Preprocess canvas for better OCR quality
-function preprocessCanvas(canvas: HTMLCanvasElement): HTMLCanvasElement {
-  const ctx = canvas.getContext("2d")!;
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imageData.data;
-
-  // Convert to grayscale and increase contrast
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    
-    // Convert to grayscale using luminance formula
-    const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-    
-    // Increase contrast (simple threshold)
-    const enhanced = gray > 128 ? 255 : gray < 64 ? 0 : gray;
-    
-    data[i] = enhanced;     // Red
-    data[i + 1] = enhanced; // Green
-    data[i + 2] = enhanced; // Blue
-    // Alpha channel stays the same
-  }
-
-  // Create new canvas with processed image
-  const processedCanvas = document.createElement("canvas");
-  processedCanvas.width = canvas.width;
-  processedCanvas.height = canvas.height;
-  const processedCtx = processedCanvas.getContext("2d")!;
-  processedCtx.putImageData(imageData, 0, 0);
-
-  return processedCanvas;
+// Enhanced preprocessing function with advanced image enhancement
+function preprocessCanvas(
+  canvas: HTMLCanvasElement, 
+  options: Partial<ImageEnhancementOptions> = {}
+): HTMLCanvasElement {
+  // Determine optimal scale if not provided
+  const scale = options.scale || Math.min(2, getOptimalScale(canvas.width, canvas.height));
+  
+  const enhancementOptions: ImageEnhancementOptions = {
+    scale,
+    sharpen: true,
+    denoise: true,
+    enhanceContrast: true,
+    adaptiveThreshold: true,
+    antiAlias: true,
+    maxWidth: 4000,
+    maxHeight: 4000,
+    preserveAspectRatio: true,
+    ...options
+  };
+  
+  return enhanceImageForOCR(canvas, enhancementOptions);
 }
 
 // Process full page instead of regions for better accuracy
@@ -43,8 +35,25 @@ export async function ocrFullPage(
   console.log(`Starting full-page OCR for page ${page}`);
   
   try {
-    // Preprocess the entire canvas
-    const processedCanvas = preprocessCanvas(canvas);
+    // Preprocess the entire canvas with moderate quality settings to prevent freezing
+    const pixelCount = canvas.width * canvas.height;
+    const isLargeImage = pixelCount > 1000000; // 1MP+
+    
+    const processedCanvas = preprocessCanvas(canvas, {
+      scale: isLargeImage ? 1.5 : Math.min(2, getOptimalScale(canvas.width, canvas.height)),
+      sharpen: !isLargeImage,
+      denoise: false, // Disable for full page to save processing
+      enhanceContrast: true,
+      adaptiveThreshold: !isLargeImage, // Skip for large images
+      maxWidth: 2000, // Reduced from 3000
+      maxHeight: 2000  // Reduced from 3000
+    });
+    
+    // Get optimal OCR configuration
+    const ocrConfig = applyConfigWithLogging(
+      getOptimalConfig(processedCanvas.width, processedCanvas.height, 'medium', 'paragraph'),
+      'full-page OCR'
+    );
     
     const res = await Tesseract.recognize(processedCanvas, "eng", {
       logger: (m) => {
@@ -52,11 +61,7 @@ export async function ocrFullPage(
           console.log(`OCR Progress: ${Math.round(m.progress * 100)}%`);
         }
       },
-      tessedit_pageseg_mode: Tesseract.PSM.AUTO,
-      tessedit_ocr_engine_mode: Tesseract.OEM.LSTM_ONLY,
-      // Better settings for small text
-      tessedit_char_blacklist: '',
-      preserve_interword_spaces: '1',
+      ...ocrConfig
     });
 
     console.log(`Full-page OCR completed. Text length: ${res.data.text.length}`);
@@ -126,10 +131,26 @@ export async function ocrRegions(
       const regionCtx = regionCanvas.getContext("2d")!;
       regionCtx.putImageData(data, 0, 0);
 
-      // Preprocess the region
-      const processedCanvas = preprocessCanvas(regionCanvas);
+      // Preprocess the region with enhanced settings
+      const processedCanvas = preprocessCanvas(regionCanvas, {
+        scale: Math.min(4, getOptimalScale(regionCanvas.width, regionCanvas.height)),
+        sharpen: true,
+        denoise: true,
+        enhanceContrast: true,
+        adaptiveThreshold: true
+      });
 
       console.log(`Starting Tesseract recognition for region ${i + 1}`);
+      
+      // Estimate text size based on region dimensions
+      const avgDimension = (paddedWidth + paddedHeight) / 2;
+      const textSize = avgDimension < 100 ? 'small' : avgDimension < 300 ? 'medium' : 'large';
+      
+      // Get optimal configuration for this region
+      const regionConfig = applyConfigWithLogging(
+        getOptimalConfig(processedCanvas.width, processedCanvas.height, textSize, 'paragraph'),
+        `region ${i + 1}`
+      );
       
       const res = await Tesseract.recognize(processedCanvas, "eng", {
         logger: (m) => {
@@ -137,11 +158,7 @@ export async function ocrRegions(
             console.log(`Region ${i + 1} OCR Progress: ${Math.round(m.progress * 100)}%`);
           }
         },
-        tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK,
-        tessedit_ocr_engine_mode: Tesseract.OEM.LSTM_ONLY,
-        // Better settings for small text
-        tessedit_char_blacklist: '',
-        preserve_interword_spaces: '1',
+        ...regionConfig
       });
 
       console.log(`OCR completed for region ${i + 1}. Text length: ${res.data.text.length}, confidence: ${res.data.confidence}`);

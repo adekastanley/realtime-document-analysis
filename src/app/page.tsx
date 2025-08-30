@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { DocumentUploader } from "@/components/DocumentUploader";
+import { DragDropUploader } from "@/components/DragDropUploader";
 import { PdfViewer } from "@/components/PdfViewer";
 import { ImageViewer } from "@/components/ImageViewer";
 import { ResultsPanel } from "@/components/ResultsPanel";
@@ -58,8 +59,35 @@ export default function Home() {
               }
             />
           ) : (
-            <div className="h-full flex items-center justify-center text-muted-foreground">
-              Upload a PDF or image to get started
+            <div className="h-full flex items-center justify-center p-8">
+              <DragDropUploader 
+                onFileSelect={onUpload}
+                className="w-full max-w-md"
+              >
+                <div className="flex flex-col items-center justify-center space-y-4">
+                  <svg
+                    className="w-16 h-16 text-gray-400"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                    />
+                  </svg>
+                  <div className="text-center">
+                    <p className="text-lg font-medium text-gray-700">
+                      Drop files here or click to browse
+                    </p>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Supports PDF, PNG, JPG, JPEG, TIFF, BMP, WebP
+                    </p>
+                  </div>
+                </div>
+              </DragDropUploader>
             </div>
           )}
         </section>
