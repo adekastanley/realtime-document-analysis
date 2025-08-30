@@ -6,6 +6,7 @@ import type { OCRRegion } from "@/utils/types";
 import { loadDetector, detectLayout } from "@/utils/cv";
 import { ocrRegions, ocrFullPage } from "@/utils/ocr-improved";
 import { smartTextExtraction } from "@/utils/pdf-text-extraction";
+import { PanZoomCanvas } from "./PanZoomCanvas";
 
 
 export function PdfViewer({
@@ -23,13 +24,15 @@ export function PdfViewer({
   onRegionsChange: (r: OCRRegion[]) => void;
   onExtracted: (page: number, regions: OCRRegion[]) => void;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [detector, setDetector] = useState<any | null>(null);
   const [running, setRunning] = useState(false);
+  const [batchProcessing, setBatchProcessing] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [pdfjsLib, setPdfjsLib] = useState<any>(null);
+  const [pageDimensions, setPageDimensions] = useState({ width: 0, height: 0 });
+  const [pageCanvas, setPageCanvas] = useState<HTMLCanvasElement | null>(null);
 
   // Load PDF.js dynamically on client side
   useEffect(() => {
@@ -69,34 +72,49 @@ export function PdfViewer({
     };
   }, [file, pdfjsLib, onPageChange]);
 
+  // Render current page to canvas
   useEffect(() => {
     let cancelled = false;
     async function render() {
       if (!pdf) return;
+      
       const page: PDFPageProxy = await pdf.getPage(pageIndex + 1);
       // Use higher scale for better OCR quality - aim for 300 DPI equivalent
       const baseScale = 2.5;
       const optimalScale = Math.min(4, Math.max(baseScale, 300 / 72)); // 300 DPI target
       const viewport = page.getViewport({ scale: optimalScale });
-      const canvas = canvasRef.current!;
-      const ctx = canvas.getContext("2d")!;
+      
+      // Create a canvas to render the page
+      const canvas = document.createElement('canvas');
       canvas.width = viewport.width;
       canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d')!;
 
       await page.render({ canvasContext: ctx as any, viewport }).promise;
-
-      // Clear overlay
-      const overlay = overlayRef.current!;
-      overlay.width = canvas.width;
-      overlay.height = canvas.height;
-      const octx = overlay.getContext("2d")!;
-      octx.clearRect(0, 0, overlay.width, overlay.height);
+      
+      if (!cancelled) {
+        setPageDimensions({
+          width: viewport.width,
+          height: viewport.height
+        });
+        setPageCanvas(canvas);
+      }
     }
     render();
     return () => {
       cancelled = true;
     };
   }, [pdf, pageIndex]);
+
+  // Draw page canvas to display canvas
+  const drawPageToCanvas = (canvas: HTMLCanvasElement | null) => {
+    if (!canvas || !pageCanvas) return;
+    
+    const ctx = canvas.getContext('2d')!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(pageCanvas, 0, 0);
+  };
 
   // Lazy-load detector once on client
   useEffect(() => {
@@ -115,95 +133,200 @@ export function PdfViewer({
   const prev = () => onPageChange(Math.max(0, pageIndex - 1));
   const next = () => onPageChange(Math.min((numPages || 1) - 1, pageIndex + 1));
 
-  async function handleDetect() {
-    if (!detector || !canvasRef.current) return;
-    setRunning(true);
+  // Batch process all pages
+  const handleBatchProcessAllPages = async () => {
+    if (!pdf || !pdfjsLib) return;
+    
+    setBatchProcessing(true);
+    setBatchProgress({ current: 0, total: numPages });
+    
     try {
-      const raw = await detectLayout(detector, canvasRef.current);
-      // Stamp page number and store
-      const stamped = raw.map(r => ({ ...r, page: pageIndex }));
-      onRegionsChange(stamped);
-      // Draw boxes
-      const overlay = overlayRef.current!;
-      const octx = overlay.getContext('2d')!;
-      octx.clearRect(0, 0, overlay.width, overlay.height);
-      octx.strokeStyle = '#ef4444';
-      octx.lineWidth = 2;
-      for (const r of stamped) {
-        octx.strokeRect(r.bbox.x, r.bbox.y, r.bbox.width, r.bbox.height);
+      for (let i = 0; i < numPages; i++) {
+        setBatchProgress({ current: i + 1, total: numPages });
+        
+        // Render page to canvas
+        const page: PDFPageProxy = await pdf.getPage(i + 1);
+        const baseScale = 2;
+        const viewport = page.getViewport({ scale: baseScale });
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d')!;
+        
+        await page.render({ canvasContext: ctx as any, viewport }).promise;
+        
+        // Process OCR for this page
+        const res = await ocrFullPage(canvas, i);
+        onExtracted(i, res);
+        
+        // Small delay to prevent browser freezing
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
     } finally {
-      setRunning(false);
+      setBatchProcessing(false);
+      setBatchProgress({ current: 0, total: 0 });
     }
-  }
+  };
 
-  async function handleSmartExtract() {
-    if (!canvasRef.current || !file || !pdfjsLib) return;
-    setRunning(true);
-    try {
-      const res = await smartTextExtraction(pdfjsLib, file, canvasRef.current, pageIndex, ocrFullPage);
-      onRegionsChange(res);
-      onExtracted(pageIndex, res);
-      // Draw regions
-      drawRegions(res);
-    } finally {
-      setRunning(false);
-    }
-  }
+  // Handler functions for PanZoomCanvas
+  const handleDetect = (canvas: HTMLCanvasElement | null, overlay: HTMLCanvasElement | null) => {
+    return async () => {
+      if (!detector || !canvas) return;
+      setRunning(true);
+      try {
+        const raw = await detectLayout(detector, canvas);
+        const stamped = raw.map(r => ({ ...r, page: pageIndex }));
+        onRegionsChange(stamped);
+        
+        if (overlay) {
+          const octx = overlay.getContext('2d')!;
+          octx.clearRect(0, 0, overlay.width, overlay.height);
+          octx.strokeStyle = '#ef4444';
+          octx.lineWidth = 2;
+          for (const r of stamped) {
+            octx.strokeRect(r.bbox.x, r.bbox.y, r.bbox.width, r.bbox.height);
+          }
+        }
+      } finally {
+        setRunning(false);
+      }
+    };
+  };
 
-  async function handleFullPageOCR() {
-    if (!canvasRef.current) return;
-    setRunning(true);
-    try {
-      const res = await ocrFullPage(canvasRef.current, pageIndex);
-      onRegionsChange(res);
-      onExtracted(pageIndex, res);
-      // Draw single region covering full page
-      drawRegions(res);
-    } finally {
-      setRunning(false);
-    }
-  }
+  const handleSmartExtract = (canvas: HTMLCanvasElement | null, overlay: HTMLCanvasElement | null) => {
+    return async () => {
+      if (!canvas || !file || !pdfjsLib) return;
+      setRunning(true);
+      try {
+        const res = await smartTextExtraction(pdfjsLib, file, canvas, pageIndex, ocrFullPage);
+        onRegionsChange(res);
+        onExtracted(pageIndex, res);
+        drawRegions(res, overlay);
+      } finally {
+        setRunning(false);
+      }
+    };
+  };
 
-  async function handleOCR() {
-    if (!canvasRef.current || regions.length === 0) return;
-    setRunning(true);
-    try {
-      const res = await ocrRegions(canvasRef.current, pageIndex, regions);
-      onExtracted(pageIndex, res);
-    } finally {
-      setRunning(false);
-    }
-  }
+  const handleFullPageOCR = (canvas: HTMLCanvasElement | null, overlay: HTMLCanvasElement | null) => {
+    return async () => {
+      if (!canvas) return;
+      setRunning(true);
+      try {
+        const res = await ocrFullPage(canvas, pageIndex);
+        onRegionsChange(res);
+        onExtracted(pageIndex, res);
+        drawRegions(res, overlay);
+      } finally {
+        setRunning(false);
+      }
+    };
+  };
 
-  function drawRegions(regionsToDrawn: OCRRegion[]) {
-    if (!overlayRef.current) return;
-    const overlay = overlayRef.current;
+  function drawRegions(regionsToDrawn: OCRRegion[], overlay: HTMLCanvasElement | null) {
+    if (!overlay) return;
     const octx = overlay.getContext('2d')!;
     octx.clearRect(0, 0, overlay.width, overlay.height);
-    octx.strokeStyle = '#22c55e'; // Green for successful extraction
+    octx.strokeStyle = '#22c55e';
     octx.lineWidth = 2;
     for (const r of regionsToDrawn) {
       octx.strokeRect(r.bbox.x, r.bbox.y, r.bbox.width, r.bbox.height);
     }
   }
 
-  return (
-    <div className="h-full w-full flex flex-col">
-      <div className="flex items-center justify-between p-2 border-b">
-        <div className="text-sm">Page {numPages ? pageIndex + 1 : 0} / {numPages}</div>
-        <div className="flex gap-2">
-          <button className="px-2 py-1 border rounded" onClick={prev} disabled={!pdf || pageIndex === 0}>Prev</button>
-          <button className="px-2 py-1 border rounded" onClick={next} disabled={!pdf || pageIndex >= numPages - 1}>Next</button>
-          <button className="px-2 py-1 border rounded" onClick={handleSmartExtract} disabled={!pdf || running}>{running ? '...' : 'Smart Extract'}</button>
-          <button className="px-2 py-1 border rounded" onClick={handleFullPageOCR} disabled={!pdf || running}>{running ? '...' : 'Full Page OCR'}</button>
-          <button className="px-2 py-1 border rounded" onClick={handleDetect} disabled={!pdf || !detector || running}>{running ? '...' : 'Manual Regions'}</button>
+  if (!pageDimensions.width || !pageDimensions.height) {
+    return (
+      <div className="h-full w-full flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
+          <p className="mt-2 text-sm text-gray-600">Loading PDF page...</p>
         </div>
       </div>
-      <div className="relative flex-1 overflow-auto bg-gray-50">
-        <canvas ref={canvasRef} className="block mx-auto" />
-        <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 mx-auto" />
-      </div>
+    );
+  }
+
+  return (
+    <div className="h-full w-full">
+      <PanZoomCanvas
+        width={pageDimensions.width}
+        height={pageDimensions.height}
+      >
+        {(canvas, overlay) => {
+          // Draw the page when canvas becomes available
+          if (canvas && pageCanvas && !canvas.style.backgroundImage) {
+            drawPageToCanvas(canvas);
+            canvas.style.backgroundImage = 'url(data:image/png;base64,loaded)';
+          }
+
+          return (
+            <div className="space-y-2">
+              {/* Page Navigation */}
+              <div className="flex items-center justify-between p-2 border-t bg-gray-50">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600">
+                    Page {numPages ? pageIndex + 1 : 0} / {numPages}
+                  </span>
+                  {batchProcessing && (
+                    <span className="text-xs text-blue-600">
+                      Processing {batchProgress.current}/{batchProgress.total}...
+                    </span>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <button 
+                    className="px-2 py-1 text-sm border rounded hover:bg-gray-100" 
+                    onClick={prev} 
+                    disabled={!pdf || pageIndex === 0}
+                  >
+                    Prev
+                  </button>
+                  <button 
+                    className="px-2 py-1 text-sm border rounded hover:bg-gray-100" 
+                    onClick={next} 
+                    disabled={!pdf || pageIndex >= numPages - 1}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+
+              {/* OCR Controls */}
+              <div className="flex flex-wrap items-center gap-2 p-2 border-t bg-gray-50">
+                <button 
+                  className="px-3 py-1 text-sm border rounded hover:bg-gray-100" 
+                  onClick={handleFullPageOCR(canvas, overlay)} 
+                  disabled={running || batchProcessing}
+                >
+                  {running ? 'Processing...' : 'Current Page OCR'}
+                </button>
+                <button 
+                  className="px-3 py-1 text-sm border rounded hover:bg-gray-100" 
+                  onClick={handleSmartExtract(canvas, overlay)} 
+                  disabled={running || batchProcessing}
+                >
+                  {running ? 'Processing...' : 'Smart Extract'}
+                </button>
+                <button 
+                  className="px-3 py-1 text-sm border rounded hover:bg-gray-100" 
+                  onClick={handleDetect(canvas, overlay)} 
+                  disabled={!detector || running || batchProcessing}
+                >
+                  {running ? 'Processing...' : 'Manual Regions'}
+                </button>
+                <div className="border-l border-gray-300 h-6 mx-2"></div>
+                <button 
+                  className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700" 
+                  onClick={handleBatchProcessAllPages} 
+                  disabled={!pdf || running || batchProcessing}
+                >
+                  {batchProcessing ? `Processing ${batchProgress.current}/${batchProgress.total}...` : `OCR All ${numPages} Pages`}
+                </button>
+              </div>
+            </div>
+          );
+        }}
+      </PanZoomCanvas>
     </div>
   );
 }
